@@ -771,6 +771,13 @@ class ApiService {
     return response.data;
   }
 
+  // Analyze a rendered chart (image + metadata) with Gemini vision.
+  // payload = { image_base64, chart_type, chart_title, x_axis, y_axis, x_stats, y_stats, applied_steps }
+  async analyzeChart(payload) {
+    const response = await api.post(`/api/ai/analyze-chart`, payload);
+    return response.data;
+  }
+
   async getChartData(sessionId, { chart_type, x_axis, y_axis, aggregation, filter_column, filter_value }) {
     const response = await api.post(`/api/visualization/chart-data`, {
       session_id: sessionId,

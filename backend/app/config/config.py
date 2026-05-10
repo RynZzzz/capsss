@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     PROCESSED_DIR: str = "processed"
     
     # File Settings
-    MAX_FILE_SIZE: int = 50 * 1024 * 1024   # 10MB
+    MAX_FILE_SIZE: int = 51 * 1024 * 1024   # 51MB
     
     GOOGLE_CLIENT_ID: str = "191625527569-l6ereqd4ga4o4h5l4t5vr685nri9l2hj.apps.googleusercontent.com"
     GEMINI_API_KEY: str = ""

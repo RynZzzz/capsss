@@ -1,12 +1,14 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List, Any
 import os
 import json
 import logging
 import re
+import base64
 from app.config import settings
 from google import genai
+from google.genai import types as genai_types
 import sys
 import requests
 from sqlalchemy.orm import Session
@@ -1389,3 +1391,147 @@ async def clear_chart_recommendations(
         session_record.chart_recommendations = None
         db.commit()
     return {"cleared": True}
+
+
+# ---------------------------------------------------------------------------
+# Analyze Chart (vision) — takes a chart image + metadata, returns insight
+# ---------------------------------------------------------------------------
+
+class ColumnStats(BaseModel):
+    name: str
+    type: Optional[str] = None
+    total: Optional[int] = None
+    missing: Optional[int] = None
+    missing_pct: Optional[float] = None
+    mean: Optional[float] = None
+    median: Optional[float] = None
+    std: Optional[float] = None
+    min: Optional[Any] = None
+    max: Optional[Any] = None
+    outliers: Optional[int] = None
+    unique: Optional[int] = None
+    top_value: Optional[Any] = None
+    top_freq: Optional[int] = None
+
+
+class StepSummary(BaseModel):
+    type: str
+    description: Optional[str] = None
+    column: Optional[str] = None
+
+
+class ChartAnalysisRequest(BaseModel):
+    image_base64: str
+    chart_type: str
+    x_axis: Optional[str] = None
+    y_axis: Optional[str] = None
+    x_stats: Optional[ColumnStats] = None
+    y_stats: Optional[ColumnStats] = None
+    applied_steps: Optional[List[StepSummary]] = []
+    chart_title: Optional[str] = None
+
+
+def _build_chart_prompt(body: ChartAnalysisRequest) -> str:
+    lines = [
+        f"Chart type: {body.chart_type}",
+        f"Chart title: {body.chart_title or 'Untitled'}",
+        f"X-axis column: {body.x_axis or 'N/A'}",
+        f"Y-axis column: {body.y_axis or 'N/A'}",
+    ]
+    for label, stats in [("X-axis", body.x_stats), ("Y-axis", body.y_stats)]:
+        if not stats:
+            continue
+        lines.append(f"\n{label} column stats ({stats.name}):")
+        lines.append(f"  Data type    : {stats.type}")
+        lines.append(f"  Total rows   : {stats.total}")
+        lines.append(f"  Missing      : {stats.missing} ({stats.missing_pct}%)")
+        lines.append(f"  Unique values: {stats.unique}")
+        if stats.mean is not None or stats.median is not None:
+            lines.append(f"  Mean / Median: {stats.mean} / {stats.median}")
+        if stats.std is not None:
+            lines.append(f"  Std dev      : {stats.std}")
+        if stats.min is not None or stats.max is not None:
+            lines.append(f"  Min / Max    : {stats.min} / {stats.max}")
+        if stats.outliers:
+            lines.append(f"  Outliers     : {stats.outliers}")
+        if stats.top_value is not None:
+            lines.append(f"  Top value    : {stats.top_value} ({stats.top_freq} times)")
+
+    if body.applied_steps:
+        relevant = [
+            s.description or s.type
+            for s in body.applied_steps
+            if (s.column in (body.x_axis, body.y_axis)) or not s.column
+        ]
+        if relevant:
+            lines.append("\nApplied cleaning steps on these columns:")
+            for lbl in relevant:
+                lines.append(f"  - {lbl}")
+
+    context = "\n".join(lines)
+    return (
+        "You are a data analysis assistant. A user is viewing the chart attached.\n\n"
+        f"Chart metadata:\n{context}\n\n"
+        "Based on both the visual chart and the metadata above, provide:\n"
+        "1. What the chart shows (1-2 sentences)\n"
+        "2. Key patterns, trends, or distribution shape\n"
+        "3. Any anomalies, outliers, or notable points visible\n"
+        "4. One concrete actionable recommendation\n"
+        "Be concise and specific. Refer to actual column names and values."
+    )
+
+
+def _gemini_vision(image_bytes: bytes, prompt: str) -> Optional[str]:
+    """Try Gemini vision with image + text. Returns insight text or None on failure."""
+    api_key = settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY") or os.getenv("gemini_api_key")
+    if not api_key:
+        return None
+    try:
+        client = genai.Client(api_key=api_key)
+        image_part = genai_types.Part.from_bytes(data=image_bytes, mime_type="image/png")
+    except Exception as exc:
+        logger.warning("Gemini vision client/part setup failed: %s", exc)
+        return None
+
+    last_error = None
+    for model_name in ("gemini-2.5-flash", "gemini-2.0-flash", "models/gemini-2.0-flash"):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[image_part, prompt],
+            )
+            text_out = getattr(response, "text", "") or ""
+            if text_out.strip():
+                return text_out
+        except Exception as exc:
+            last_error = exc
+            continue
+    if last_error:
+        logger.warning("Gemini vision failed on all models: %s", last_error)
+    return None
+
+
+@router.post("/analyze-chart")
+async def analyze_chart(body: ChartAnalysisRequest):
+    """Analyze a rendered chart with Gemini vision, falling back to text-only metadata analysis."""
+    prompt = _build_chart_prompt(body)
+    try:
+        image_bytes = base64.b64decode(body.image_base64, validate=False)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64 image data")
+
+    # Path 1: Gemini vision (image + text)
+    insight = _gemini_vision(image_bytes, prompt)
+    if insight:
+        return {"success": True, "insight": insight.strip()}
+
+    # Path 2: Text-only fallback (metadata only, no image)
+    text_out, _ = _ai_generate(prompt)
+    if text_out:
+        return {
+            "success": True,
+            "insight": text_out.strip(),
+            "note": "Image analysis unavailable \u2014 insight based on metadata only.",
+        }
+
+    raise HTTPException(status_code=503, detail="AI analysis unavailable")

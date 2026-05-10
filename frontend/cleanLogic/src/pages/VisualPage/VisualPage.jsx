@@ -38,6 +38,8 @@ import { useNavigate } from "react-router-dom";
 import { useDataProfiler } from "../../components/hooks/useDataProfiler";
 import ApiService from "../../services/api";
 import { getProject, getVizList, invalidateVizList } from "../../cache/sessionCache";
+import { captureChartAsBase64 } from "../../utils/captureChart";
+import { buildChartContext } from "../../utils/buildChartContext";
 
 
 const formatActionLabel = (change) => {
@@ -146,6 +148,10 @@ const DataVisualizationDashboard = () => {
   const [chartDataCache, setChartDataCache] = React.useState({});
   const chartFetchingRef = React.useRef(new Set());
   const [sharedBrushRange, setSharedBrushRange] = useState({ startIndex: 0, endIndex: undefined });
+  // Per-chart "Analyze with AI" state (keyed by chart.id):
+  //   chartInsights[id] = { text, note, error, loading }
+  const chartBodyRefs = React.useRef({});
+  const [chartInsights, setChartInsights] = useState({});
   const navigate = useNavigate();
   const { profile, filename, sessionId, isLoading, highlightMode } =
     useDataProfiler();
@@ -727,6 +733,69 @@ const DataVisualizationDashboard = () => {
       setAiLoading(false);
     }
   };
+
+  // ── Per-chart "Analyze with AI" (Gemini vision) ────────────────────────────
+  // Build a compact list of applied cleaning steps, prefer projectSteps (has
+  // column info), fall back to changeLog. Backend filters by column anyway.
+  const appliedStepsCompact = useMemo(() => {
+    const source = (projectSteps?.length ? projectSteps : changeLog) || [];
+    return source
+      .map((s) => ({
+        type: s?.type || "unknown",
+        column: s?.column || s?.col_name || null,
+        description: formatActionLabel(s || {}) || s?.action || s?.type || "Update",
+      }))
+      .slice(-20);
+  }, [projectSteps, changeLog]);
+
+  const handleAnalyzeChart = React.useCallback(
+    async (chart) => {
+      if (!chart) return;
+      const chartId = chart.id;
+      setChartInsights((prev) => ({
+        ...prev,
+        [chartId]: { ...(prev[chartId] || {}), loading: true, error: null },
+      }));
+      try {
+        const ref = { current: chartBodyRefs.current[chartId] };
+        if (!ref.current) throw new Error("Chart is still rendering — try again in a moment.");
+        // Give recharts one extra paint tick so getBoundingClientRect returns real pixels.
+        await new Promise((r) => requestAnimationFrame(() => r()));
+        const imageBase64 = await captureChartAsBase64(ref);
+        const payload = {
+          image_base64: imageBase64,
+          ...buildChartContext(
+            profile,
+            chart.chart_type,
+            chart.x_axis,
+            chart.y_axis,
+            appliedStepsCompact,
+            chart.title || null,
+          ),
+        };
+        const result = await ApiService.analyzeChart(payload);
+        setChartInsights((prev) => ({
+          ...prev,
+          [chartId]: {
+            loading: false,
+            text: result?.insight || "No insight returned.",
+            note: result?.note || null,
+            error: null,
+          },
+        }));
+      } catch (err) {
+        setChartInsights((prev) => ({
+          ...prev,
+          [chartId]: {
+            ...(prev[chartId] || {}),
+            loading: false,
+            error: err?.response?.data?.detail || err?.message || "Analysis failed",
+          },
+        }));
+      }
+    },
+    [profile, appliedStepsCompact],
+  );
 
   const previewColumns = useMemo(() => {
     if (profile?.data?.columns) return profile.data.columns;
@@ -1572,7 +1641,10 @@ const DataVisualizationDashboard = () => {
                     )}
 
                     {/* Chart */}
-                    <div className={`h-52 ${crossFilter && crossFilter.column === displayChart.x_axis ? "ring-2 ring-blue-400 rounded-xl" : ""}`}>
+                    <div
+                      ref={(el) => { chartBodyRefs.current[chart.id] = el; }}
+                      className={`h-52 ${crossFilter && crossFilter.column === displayChart.x_axis ? "ring-2 ring-blue-400 rounded-xl" : ""}`}
+                    >
                       {isChartLoading ? (
                         <div className="h-full flex items-center justify-center bg-gray-50 rounded-xl">
                           <div className="flex flex-col items-center gap-2">
@@ -1696,6 +1768,49 @@ const DataVisualizationDashboard = () => {
                     {chart.isUserChart && (
                       <span className="text-[9px] font-medium text-[#10B981]">Custom chart</span>
                     )}
+
+                    {/* ── Analyze with AI (Gemini vision) ─────────────────── */}
+                    {(() => {
+                      const insightState = chartInsights[chart.id] || {};
+                      const analyzing = !!insightState.loading;
+                      const canAnalyze = !isChartLoading && data.length > 0 && !analyzing;
+                      return (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handleAnalyzeChart(chart)}
+                            disabled={!canAnalyze}
+                            className="mt-1 inline-flex items-center justify-center gap-1.5 self-start px-3 py-1.5 text-[11px] font-medium text-white rounded-lg disabled:opacity-40 hover:opacity-90 transition-opacity"
+                            style={{ background: "linear-gradient(90deg,#AD46FF,#2B7FFF)" }}
+                            title={data.length === 0 ? "No data to analyze yet" : "Analyze this chart with AI vision"}
+                          >
+                            {analyzing ? (
+                              <>
+                                <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                Analyzing…
+                              </>
+                            ) : (
+                              <>
+                                <Sparkles className="w-3 h-3" />
+                                {insightState.text ? "Re-analyze with AI" : "Analyze with AI"}
+                              </>
+                            )}
+                          </button>
+
+                          {insightState.text && (
+                            <div className="mt-1 p-2.5 bg-[#AD46FF]/5 border border-[#AD46FF]/20 rounded-lg text-[11px] text-[#374151] leading-relaxed whitespace-pre-wrap">
+                              {insightState.text}
+                              {insightState.note && (
+                                <p className="mt-1.5 text-[10px] text-[#9CA3AF] italic">{insightState.note}</p>
+                              )}
+                            </div>
+                          )}
+                          {insightState.error && (
+                            <p className="mt-1 text-[10px] text-red-500">{insightState.error}</p>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                 );
               })}
