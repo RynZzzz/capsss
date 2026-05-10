@@ -25,12 +25,31 @@ class Settings(BaseSettings):
     PROCESSED_DIR: str = "processed"
     
     # File Settings
-    MAX_FILE_SIZE: int = 51 * 1024 * 1024   # 51MB
+    # NOTE: On Cloud Run, requests >32 MiB require --use-http2 + gen2 execution
+    # environment. With HTTP/1.1 the ingress hard-caps the body at 32 MiB
+    # regardless of this value.
+    MAX_FILE_SIZE: int = 200 * 1024 * 1024  # 200 MiB
     
     GOOGLE_CLIENT_ID: str = "191625527569-l6ereqd4ga4o4h5l4t5vr685nri9l2hj.apps.googleusercontent.com"
     GEMINI_API_KEY: str = ""
     OPENROUTER_API_KEY: str = ""
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    OPENROUTER_TEXT_MODEL: str = "openrouter/auto"
+    OPENROUTER_VISION_MODEL: str = "openrouter/auto"
     GROQ_API_KEY: str = ""
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+    # Llama 3.3 70B Versatile is Groq's flagship text model. Override to
+    # "llama-3.1-8b-instant" for faster/cheaper or "deepseek-r1-distill-llama-70b"
+    # for stronger reasoning.
+    GROQ_TEXT_MODEL: str = "llama-3.3-70b-versatile"
+    # Llama 4 Scout is multimodal (vision-capable) on Groq. Override to
+    # "meta-llama/llama-4-maverick-17b-128e-instruct" for stronger vision or
+    # "llama-3.2-11b-vision-preview" for the smaller legacy vision model.
+    GROQ_VISION_MODEL: str = "meta-llama/llama-4-scout-17b-16e-instruct"
+    # Primary AI provider: "groq" (default), "openrouter", or "ollama" (local).
+    # _ai_generate / _vision_analyze try this provider first then fall through
+    # the standard chain on failure.
+    AI_PRIMARY_PROVIDER: str = "groq"
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

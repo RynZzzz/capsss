@@ -7,8 +7,6 @@ import logging
 import re
 import base64
 from app.config import settings
-from google import genai
-from google.genai import types as genai_types
 import sys
 import requests
 from sqlalchemy.orm import Session
@@ -22,24 +20,149 @@ logger = logging.getLogger("uvicorn.error")
 
 
 # ---------------------------------------------------------------------------
-# Gemini (direct) helpers
+# Unified LLM helper — OpenAI-compatible chat completions (Groq + OpenRouter)
 # ---------------------------------------------------------------------------
+# Both Groq and OpenRouter speak the OpenAI /chat/completions wire format, so
+# one helper handles both. Provider is selected per call; _ai_generate and
+# _vision_analyze chain Groq → OpenRouter → Ollama.
 
-def _get_client(api_key: str):
-    return genai.Client(api_key=api_key)
+_PROVIDER_GROQ = "groq"
+_PROVIDER_OPENROUTER = "openrouter"
 
 
-def _generate_content(client, text: str):
-    last_error = None
-    for model_name in ("gemini-2.5-flash", "gemini-2.0-flash", "models/gemini-2.0-flash"):
-        try:
-            return client.models.generate_content(
-                model=model_name,
-                contents=text,
-            )
-        except Exception as exc:
-            last_error = exc
-    raise last_error
+def _provider_config(provider: str, *, vision: bool) -> Optional[dict]:
+    """Return {api_key, base_url, default_model, extra_headers} for the given
+    provider, or None if the provider is not configured (no API key)."""
+    if provider == _PROVIDER_GROQ:
+        api_key = (
+            settings.GROQ_API_KEY
+            or os.getenv("GROQ_API_KEY")
+            or os.getenv("groq_api_key")
+        )
+        if not api_key:
+            return None
+        return {
+            "api_key": api_key,
+            "base_url": (settings.GROQ_BASE_URL or "https://api.groq.com/openai/v1").rstrip("/"),
+            "default_model": (
+                settings.GROQ_VISION_MODEL if vision else settings.GROQ_TEXT_MODEL
+            ),
+            "extra_headers": {},
+        }
+    if provider == _PROVIDER_OPENROUTER:
+        api_key = (
+            settings.OPENROUTER_API_KEY
+            or os.getenv("OPENROUTER_API_KEY")
+            or os.getenv("openrouter_api_key")
+        )
+        if not api_key:
+            return None
+        # OpenRouter recommends attribution headers for usage analytics
+        attr: dict = {}
+        referer = os.getenv("OPENROUTER_HTTP_REFERER") or os.getenv("PUBLIC_URL") or ""
+        if referer:
+            attr["HTTP-Referer"] = referer
+        title = os.getenv("OPENROUTER_X_TITLE") or "CleanLogic"
+        if title:
+            attr["X-Title"] = title
+        return {
+            "api_key": api_key,
+            "base_url": (settings.OPENROUTER_BASE_URL or "https://openrouter.ai/api/v1").rstrip("/"),
+            "default_model": (
+                settings.OPENROUTER_VISION_MODEL if vision else settings.OPENROUTER_TEXT_MODEL
+            ),
+            "extra_headers": attr,
+        }
+    return None
+
+
+def _llm_chat(
+    prompt: str,
+    *,
+    provider: str = _PROVIDER_GROQ,
+    model: Optional[str] = None,
+    image_bytes: Optional[bytes] = None,
+    image_mime: str = "image/png",
+    timeout: int = 120,
+) -> tuple[Optional[str], dict]:
+    """POST to an OpenAI-compatible /chat/completions endpoint. Supports
+    optional image input via the standard {type:image_url} message part.
+
+    Returns (text_or_None, usage_dict). Returns (None, {}) on any failure so
+    callers can fall back through the provider chain.
+    """
+    cfg = _provider_config(provider, vision=image_bytes is not None)
+    if cfg is None:
+        return None, {}
+
+    chosen_model = model or cfg["default_model"]
+    if not chosen_model:
+        logger.warning("%s: no model configured", provider)
+        return None, {}
+    url = f"{cfg['base_url']}/chat/completions"
+
+    if image_bytes is not None:
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        content: Any = [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:{image_mime};base64,{b64}"}},
+        ]
+    else:
+        content = prompt
+
+    payload = {
+        "model": chosen_model,
+        "messages": [{"role": "user", "content": content}],
+        "stream": False,
+    }
+    headers = {
+        "Authorization": f"Bearer {cfg['api_key']}",
+        "Content-Type": "application/json",
+        **cfg["extra_headers"],
+    }
+
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    except requests.exceptions.RequestException as exc:
+        logger.warning("%s request failed: %s", provider, exc)
+        return None, {}
+
+    if not response.ok:
+        logger.warning(
+            "%s %s on model=%s: %s",
+            provider,
+            response.status_code,
+            chosen_model,
+            response.text[:300],
+        )
+        return None, {}
+
+    try:
+        data = response.json()
+    except ValueError:
+        logger.warning("%s returned non-JSON body", provider)
+        return None, {}
+
+    text_out = (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+    ) or ""
+    usage = data.get("usage") or {}
+    routed = data.get("model") or chosen_model
+    if text_out:
+        logger.info("%s routed model=%s", provider, routed)
+    return text_out, usage
+
+
+def _provider_chain(primary: Optional[str] = None) -> List[str]:
+    """Return ordered list of providers to try, with the configured primary
+    first and the other(s) as fallback."""
+    chain = [primary or settings.AI_PRIMARY_PROVIDER or _PROVIDER_GROQ]
+    for p in (_PROVIDER_GROQ, _PROVIDER_OPENROUTER):
+        if p not in chain:
+            chain.append(p)
+    return chain
 
 
 # ---------------------------------------------------------------------------
@@ -76,21 +199,16 @@ def _ollama_generate(text: str):
 
 
 # ---------------------------------------------------------------------------
-# Shared AI generate — tries Gemini → Ollama (local phi4-mini)
+# Shared AI generate — chains primary provider → fallback provider → Ollama
 # ---------------------------------------------------------------------------
 
 def _ai_generate(text: str):
-    """Try Gemini first, then local Ollama (phi4-mini) as fallback."""
-    api_key = settings.GEMINI_API_KEY or os.getenv("gemini_api_key")
-    if api_key:
-        try:
-            client = _get_client(api_key)
-            response = _generate_content(client, text)
-            usage = getattr(response, "usage_metadata", None) or {}
-            text_out = getattr(response, "text", "") or ""
+    """Try the configured primary provider (default: Groq), fall back through
+    other configured providers, then to local Ollama as last resort."""
+    for provider in _provider_chain():
+        text_out, usage = _llm_chat(text, provider=provider)
+        if text_out:
             return text_out, usage
-        except Exception as exc:
-            logger.warning("Gemini failed (%s), falling back to Ollama phi4-mini", exc)
 
     text_out, usage = _ollama_generate(text)
     if text_out is not None:
@@ -537,7 +655,7 @@ async def recommend_cleaning(request: RecommendRequest):
 
 
 # ---------------------------------------------------------------------------
-# Preprocessing suggestions  (DSL-based, Gemini-powered)
+# Preprocessing suggestions  (DSL-based, OpenRouter-powered)
 # ---------------------------------------------------------------------------
 
 _SUGGEST_SYSTEM_PROMPT = """You are a data preprocessing recommendation engine.
@@ -1481,47 +1599,36 @@ def _build_chart_prompt(body: ChartAnalysisRequest) -> str:
     )
 
 
-def _gemini_vision(image_bytes: bytes, prompt: str) -> Optional[str]:
-    """Try Gemini vision with image + text. Returns insight text or None on failure."""
-    api_key = settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY") or os.getenv("gemini_api_key")
-    if not api_key:
-        return None
-    try:
-        client = genai.Client(api_key=api_key)
-        image_part = genai_types.Part.from_bytes(data=image_bytes, mime_type="image/png")
-    except Exception as exc:
-        logger.warning("Gemini vision client/part setup failed: %s", exc)
-        return None
-
-    last_error = None
-    for model_name in ("gemini-2.5-flash", "gemini-2.0-flash", "models/gemini-2.0-flash"):
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=[image_part, prompt],
-            )
-            text_out = getattr(response, "text", "") or ""
-            if text_out.strip():
-                return text_out
-        except Exception as exc:
-            last_error = exc
-            continue
-    if last_error:
-        logger.warning("Gemini vision failed on all models: %s", last_error)
+def _vision_analyze(image_bytes: bytes, prompt: str) -> Optional[str]:
+    """Run vision analysis via the configured provider chain (Groq first by
+    default, then OpenRouter). Returns insight text or None on any failure
+    (including no API key on any provider).
+    """
+    for provider in _provider_chain():
+        text_out, _usage = _llm_chat(
+            prompt,
+            provider=provider,
+            image_bytes=image_bytes,
+            image_mime="image/png",
+        )
+        if text_out and text_out.strip():
+            return text_out
     return None
 
 
 @router.post("/analyze-chart")
 async def analyze_chart(body: ChartAnalysisRequest):
-    """Analyze a rendered chart with Gemini vision, falling back to text-only metadata analysis."""
+    """Analyze a rendered chart with a vision LLM (Groq first, then
+    OpenRouter), falling back to text-only metadata analysis if the vision
+    call fails or the routed model can't see images."""
     prompt = _build_chart_prompt(body)
     try:
         image_bytes = base64.b64decode(body.image_base64, validate=False)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid base64 image data")
 
-    # Path 1: Gemini vision (image + text)
-    insight = _gemini_vision(image_bytes, prompt)
+    # Path 1: Vision (image + text) via the configured provider chain
+    insight = _vision_analyze(image_bytes, prompt)
     if insight:
         return {"success": True, "insight": insight.strip()}
 

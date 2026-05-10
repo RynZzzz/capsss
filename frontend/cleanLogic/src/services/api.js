@@ -264,18 +264,66 @@ class ApiService {
     const response = await api.post("/api/login/email", { email, password });
     return response.data;
   }
-  // Upload and profile file
-  async uploadFile(file) {
-    const formData = new FormData();
-    formData.append("file", file);
+  // Upload and profile file.
+  //
+  // Cloud Run rejects single HTTP request bodies above 32 MiB at the ingress
+  // (this applies to BOTH HTTP/1 and HTTP/2 unary requests). For larger
+  // files we slice the blob into 16 MiB chunks, POST each to /upload/chunk,
+  // then call /upload/complete to assemble + profile server-side.
+  async uploadFile(file, { onProgress } = {}) {
     const userId =
       localStorage.getItem("user_id") || localStorage.getItem("userId") || 1;
 
-    // upload route lives at root (/upload)
-    const response = await api.post(`/upload?user_id=${userId}`, formData, {
+    // 30 MiB threshold leaves safety margin under the 32 MiB Cloud Run cap.
+    const SINGLE_POST_THRESHOLD = 30 * 1024 * 1024;
+
+    if (file.size <= SINGLE_POST_THRESHOLD) {
+      // Small file — original single-POST path
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await api.post(`/upload?user_id=${userId}`, formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      onProgress?.({ phase: "complete", loaded: file.size, total: file.size });
+      return response.data;
+    }
+
+    // Large file — chunked upload
+    const CHUNK_SIZE = 16 * 1024 * 1024; // 16 MiB per chunk
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    const uploadId =
+      (typeof crypto !== "undefined" && crypto.randomUUID && crypto.randomUUID()) ||
+      `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    for (let i = 0; i < totalChunks; i++) {
+      const blob = file.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+      const form = new FormData();
+      form.append("chunk", blob, `chunk-${i}`);
+      form.append("upload_id", uploadId);
+      form.append("chunk_index", String(i));
+      form.append("total_chunks", String(totalChunks));
+      await api.post("/upload/chunk", form, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      onProgress?.({
+        phase: "uploading",
+        loaded: Math.min((i + 1) * CHUNK_SIZE, file.size),
+        total: file.size,
+        chunkIndex: i,
+        totalChunks,
+      });
+    }
+
+    // Finalize: backend reassembles + runs the same pipeline as /upload
+    const finalForm = new FormData();
+    finalForm.append("upload_id", uploadId);
+    finalForm.append("filename", file.name);
+    finalForm.append("total_chunks", String(totalChunks));
+    finalForm.append("user_id", String(userId));
+    const response = await api.post("/upload/complete", finalForm, {
       headers: { "Content-Type": "multipart/form-data" },
     });
-
+    onProgress?.({ phase: "complete", loaded: file.size, total: file.size });
     return response.data;
   }
 
