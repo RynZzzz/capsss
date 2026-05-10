@@ -1,0 +1,14 @@
+.git
+.gitignore
+.last-image-tag
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.venv/
+**/venv/
+**/node_modules/
+frontend/node_modules/
+frontend/cleanLogic/dist/
+backend/catboost_info/
+backend/.env
+*.log

@@ -1,5 +1,5 @@
 import sparkleIcon from "../../assets/sparkle.svg";
-import chartIcon from "../../assets/visualicon.svg";
+import chartIcon from "../../assets/visualIcon.svg";
 import brainIcon from "../../assets/brain.svg";
 import reportIcon from "../../assets/reportIcon.svg";
 import googleIcon from "../../assets/googleIcon.svg";
@@ -8,6 +8,7 @@ import ApiServices from "../../services/api.js";
 import { useNavigate } from "react-router-dom";
 
 const GOOGLE_CLIENT_ID =
+  import.meta.env.VITE_GOOGLE_CLIENT_ID ||
   "233100127711-4utctelrrev725pi1equqbm5pq9a8s1f.apps.googleusercontent.com";
 
 const benefits = [
@@ -111,7 +112,7 @@ export default function LoginPage({ onLogin }) {
   const [suErrors, setSuErrors] = useState({});
 
   useEffect(() => {
-    if (window.google) {
+    if (window.google && GOOGLE_CLIENT_ID) {
       googleClientRef.current = google.accounts.oauth2.initTokenClient({
         client_id: GOOGLE_CLIENT_ID,
         scope: "openid email profile",
@@ -150,6 +151,10 @@ export default function LoginPage({ onLogin }) {
     if (googleClientRef.current) {
       setGlobalError("");
       googleClientRef.current.requestAccessToken();
+    } else if (!GOOGLE_CLIENT_ID) {
+      setGlobalError("Google sign-in is not configured yet.");
+    } else {
+      setGlobalError("Google sign-in is still loading. Please try again.");
     }
   }
 

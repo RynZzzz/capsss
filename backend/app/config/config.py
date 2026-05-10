@@ -14,10 +14,10 @@ class Settings(BaseSettings):
     # Server
     HOST: str = "0.0.0.0"
     PORT: int = 8000
-    DEBUG: bool = True
+    DEBUG: bool = False
     
     # CORS - Now properly handles both string and list
-    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173"
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173,https://cleanlogic-crq3zqlviq-as.a.run.app,https://cleanlogic-191625527569.asia-southeast1.run.app"
     
     # Directories
     UPLOAD_DIR: str = "uploads"
@@ -27,11 +27,10 @@ class Settings(BaseSettings):
     # File Settings
     MAX_FILE_SIZE: int = 50 * 1024 * 1024   # 10MB
     
-    GOOGLE_CLIENT_ID: str = "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"
-    GEMINI_API_KEY: str
-
-    OPENROUTER_API_KEY: str
-    GROQ_API_KEY:str
+    GOOGLE_CLIENT_ID: str = "233100127711-4utctelrrev725pi1equqbm5pq9a8s1f.apps.googleusercontent.com"
+    GEMINI_API_KEY: str = ""
+    OPENROUTER_API_KEY: str = ""
+    GROQ_API_KEY: str = ""
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

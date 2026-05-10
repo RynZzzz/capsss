@@ -1,6 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+import os
 from app.routes.upload import router as upload_router
 from app.routes.saves  import router as save_router
 from app.db.connection import init_db
@@ -29,10 +33,15 @@ app = FastAPI(
 
 
 # CORS Middleware
+from app.config.config import settings
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=settings.cors_origins_list + [
+        "https://cleanlogic-crq3zqlviq-as.a.run.app",
+        "https://cleanlogic-191625527569.asia-southeast1.run.app"
+    ],
+    allow_credentials=True,  # Set to True for OAuth cookies/sessions
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -52,7 +61,8 @@ app.include_router(sessions_router)
 app.include_router(project_router)
 app.include_router(logs_router)
 app.include_router(ml_router)
-@app.get("/")
+
+@app.get("/api")
 async def root():
     return {
         "message": "Multi-Format Data API",
@@ -63,3 +73,27 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+
+frontend_dist = Path(
+    os.getenv("FRONTEND_DIST", Path(__file__).resolve().parent / "frontend_dist")
+)
+
+if frontend_dist.exists():
+    assets_dir = frontend_dist / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    async def serve_frontend_root():
+        return FileResponse(frontend_dist / "index.html")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_frontend(full_path: str):
+        api_prefixes = ("api/", "file/", "files/", "export/", "save", "save-text", "health")
+        if full_path.startswith(api_prefixes):
+            raise HTTPException(status_code=404, detail="Not found")
+        requested_file = frontend_dist / full_path
+        if requested_file.is_file():
+            return FileResponse(requested_file)
+        return FileResponse(frontend_dist / "index.html")

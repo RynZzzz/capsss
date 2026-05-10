@@ -1,55 +1,88 @@
 from sqlalchemy import create_engine, event as sa_event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.engine import URL
 import os
+from pathlib import Path
 
 # ─── DATABASE URL ─────────────────────────────────────────────────────────────
-# Reads from environment variables; falls back to a local SQLite file for dev.
+# Reads from environment variables; falls back to an embedded SQLite file.
 #
 # PostgreSQL (production):
 #   DATABASE_URL=postgresql://user:password@host:5432/cleanlogic
 #
-# SQLite (development):
-#   DATABASE_URL=sqlite:///./cleanlogic.db
+# Cloud SQL MySQL (production):
+#   CLOUD_SQL_CONNECTION_NAME=project:region:instance
+#   DB_USER=cleanlogic
+#   DB_PASSWORD=<secret>
+#   DB_NAME=cleanlogic
 #
-DATABASE_URL = os.getenv("DATABASE_URL", f"mysql+pymysql://root:@localhost:3306/cleanLogic")
+# SQLite (low-cost Cloud Run / development):
+#   DATABASE_URL=sqlite:////tmp/cleanlogic.db
+#
+def _build_database_url():
+    explicit_url = os.getenv("DATABASE_URL")
+    if explicit_url:
+        return explicit_url
 
-# SQLite-specific: allow concurrent access across threads (needed by FastAPI)
-# connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+    cloud_sql_connection_name = os.getenv("CLOUD_SQL_CONNECTION_NAME")
+    if cloud_sql_connection_name:
+        return URL.create(
+            "mysql+pymysql",
+            username=os.getenv("DB_USER", "cleanlogic"),
+            password=os.getenv("DB_PASSWORD", ""),
+            database=os.getenv("DB_NAME", "cleanlogic"),
+            query={"unix_socket": f"/cloudsql/{cloud_sql_connection_name}"},
+        )
 
-_100MB = 100 * 1024 * 1024  # 104857600
-
-engine = create_engine(
-    DATABASE_URL,
-    echo=False,
-    pool_pre_ping=True,          # test connection health before use
-    pool_size=20,                # base connections kept open
-    max_overflow=40,             # extra connections allowed under load
-    pool_recycle=1800,           # recycle connections every 30 min to avoid MySQL's 8h timeout
-    pool_timeout=20,             # raise immediately after 20s instead of hanging
-    connect_args={"max_allowed_packet": _100MB},  # PyMySQL client-side packet budget
-)
+    return "sqlite:////tmp/cleanlogic.db"
 
 
-@sa_event.listens_for(engine, "connect")
-def _set_max_allowed_packet(dbapi_conn, _connection_record):
-    """Raise MySQL/MariaDB max_allowed_packet to 100 MB on every new connection.
+DATABASE_URL = _build_database_url()
 
-    SET SESSION affects the current connection immediately — no SUPER privilege
-    needed.  SET GLOBAL is attempted afterwards as a best-effort so that other
-    clients (e.g. a second server process) also benefit.
-    """
-    cursor = dbapi_conn.cursor()
-    try:
-        cursor.execute("SET SESSION max_allowed_packet = 104857600")  # 100 MB, current conn
-    except Exception:
-        pass
-    try:
-        cursor.execute("SET GLOBAL max_allowed_packet = 104857600")   # 100 MB, future conns
-    except Exception:
-        pass  # no SUPER privilege — session setting still applies
-    finally:
-        cursor.close()
+database_url_text = str(DATABASE_URL)
+is_sqlite = database_url_text.startswith("sqlite")
+
+if is_sqlite and database_url_text.startswith("sqlite:///"):
+    sqlite_path = database_url_text.replace("sqlite:///", "", 1)
+    if sqlite_path and sqlite_path != ":memory:":
+        Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)
+
+engine_kwargs = {
+    "echo": False,
+    "pool_pre_ping": True,
+}
+
+if is_sqlite:
+    engine_kwargs["connect_args"] = {"check_same_thread": False}
+else:
+    _100MB = 100 * 1024 * 1024  # 104857600
+    engine_kwargs.update({
+        "pool_size": 20,                # base connections kept open
+        "max_overflow": 40,             # extra connections allowed under load
+        "pool_recycle": 1800,           # recycle connections every 30 min to avoid MySQL's 8h timeout
+        "pool_timeout": 20,             # raise immediately after 20s instead of hanging
+        "connect_args": {"max_allowed_packet": _100MB},  # PyMySQL client-side packet budget
+    })
+
+engine = create_engine(DATABASE_URL, **engine_kwargs)
+
+
+if not is_sqlite:
+    @sa_event.listens_for(engine, "connect")
+    def _set_max_allowed_packet(dbapi_conn, _connection_record):
+        """Raise MySQL/MariaDB max_allowed_packet to 100 MB on every new connection."""
+        cursor = dbapi_conn.cursor()
+        try:
+            cursor.execute("SET SESSION max_allowed_packet = 104857600")  # 100 MB, current conn
+        except Exception:
+            pass
+        try:
+            cursor.execute("SET GLOBAL max_allowed_packet = 104857600")   # 100 MB, future conns
+        except Exception:
+            pass  # no SUPER privilege — session setting still applies
+        finally:
+            cursor.close()
 
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -88,6 +121,24 @@ def init_db():
     _migrate_accounts_table()
     _migrate_files_table()
     _migrate_preprocessing_jobs_table()
+    _ensure_default_user()
+
+
+def _ensure_default_user():
+    """Create the default demo user expected by anonymous upload flows."""
+    from sqlalchemy import text as _text
+    with engine.connect() as conn:
+        try:
+            conn.execute(_text(
+                """
+                INSERT INTO users (id, email, username, is_active)
+                SELECT 1, 'demo@cleanlogic.local', 'Demo User', 1
+                WHERE NOT EXISTS (SELECT 1 FROM users WHERE id = 1)
+                """
+            ))
+            conn.commit()
+        except Exception:
+            pass
 
 
 def _migrate_sessions_table():
