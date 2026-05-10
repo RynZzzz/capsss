@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # File Settings
     MAX_FILE_SIZE: int = 50 * 1024 * 1024   # 10MB
     
-    GOOGLE_CLIENT_ID: str = "233100127711-4utctelrrev725pi1equqbm5pq9a8s1f.apps.googleusercontent.com"
+    GOOGLE_CLIENT_ID: str = "191625527569-l6ereqd4ga4o4h5l4t5vr685nri9l2hj.apps.googleusercontent.com"
     GEMINI_API_KEY: str = ""
     OPENROUTER_API_KEY: str = ""
     GROQ_API_KEY: str = ""

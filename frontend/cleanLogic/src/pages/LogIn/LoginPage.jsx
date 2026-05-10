@@ -9,7 +9,7 @@ import { useNavigate } from "react-router-dom";
 
 const GOOGLE_CLIENT_ID =
   import.meta.env.VITE_GOOGLE_CLIENT_ID ||
-  "233100127711-4utctelrrev725pi1equqbm5pq9a8s1f.apps.googleusercontent.com";
+  "191625527569-l6ereqd4ga4o4h5l4t5vr685nri9l2hj.apps.googleusercontent.com";
 
 const benefits = [
   {
