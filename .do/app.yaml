@@ -4,7 +4,7 @@ region: sgp
 services:
   - name: capsss-service
     github:
-      repo: RynZzzz/capsss
+      repo: ShianMike/capsss
       branch: codex/do-app-platform-deploy
       deploy_on_push: true
     dockerfile_path: Dockerfile
