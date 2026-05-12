@@ -14,9 +14,10 @@ class Settings(BaseSettings):
     # Server
     HOST: str = "0.0.0.0"
     PORT: int = 8000
-    DEBUG: bool = True
+    DEBUG: bool = False
     
-    # CORS - Now properly handles both string and list
+    # CORS — comma-separated list. Override via CORS_ORIGINS env var in production
+    # (App Platform: set this to the public URL of the deployed app).
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173"
     
     # Directories
@@ -25,13 +26,30 @@ class Settings(BaseSettings):
     PROCESSED_DIR: str = "processed"
     
     # File Settings
-    MAX_FILE_SIZE: int = 50 * 1024 * 1024   # 10MB
+    # App Platform defaults to a 100 MiB request body cap. Files larger than
+    # ~95 MiB should use the /upload/chunk + /upload/complete flow.
+    MAX_FILE_SIZE: int = 200 * 1024 * 1024  # 200 MiB
     
-    GOOGLE_CLIENT_ID: str = "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"
-    GEMINI_API_KEY: str
-
-    OPENROUTER_API_KEY: str
-    GROQ_API_KEY:str
+    GOOGLE_CLIENT_ID: str = "191625527569-l6ereqd4ga4o4h5l4t5vr685nri9l2hj.apps.googleusercontent.com"
+    GEMINI_API_KEY: str = ""
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    OPENROUTER_TEXT_MODEL: str = "openrouter/auto"
+    OPENROUTER_VISION_MODEL: str = "openrouter/auto"
+    GROQ_API_KEY: str = ""
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+    # Llama 3.3 70B Versatile is Groq's flagship text model. Override to
+    # "llama-3.1-8b-instant" for faster/cheaper or "deepseek-r1-distill-llama-70b"
+    # for stronger reasoning.
+    GROQ_TEXT_MODEL: str = "llama-3.3-70b-versatile"
+    # Llama 4 Scout is multimodal (vision-capable) on Groq. Override to
+    # "meta-llama/llama-4-maverick-17b-128e-instruct" for stronger vision or
+    # "llama-3.2-11b-vision-preview" for the smaller legacy vision model.
+    GROQ_VISION_MODEL: str = "meta-llama/llama-4-scout-17b-16e-instruct"
+    # Primary AI provider: "groq" (default), "openrouter", or "ollama" (local).
+    # _ai_generate / _vision_analyze try this provider first then fall through
+    # the standard chain on failure.
+    AI_PRIMARY_PROVIDER: str = "groq"
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

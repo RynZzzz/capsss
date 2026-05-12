@@ -14,6 +14,11 @@ from threading import Lock
 from app.utils.helpers import sanitize_data
 
 
+def _dialect_name(db: Session) -> str:
+    bind = db.get_bind()
+    return bind.dialect.name if bind is not None else ""
+
+
 # ─────────────────────────── RECORD CACHE ────────────────────────────────────
 # Caches get_file_by_session and get_session_record — called on every request
 # across all routes. Avoids repeated DB round trips for the same session.
@@ -328,25 +333,33 @@ def upsert_session_steps(
     user_id: Optional[str] = None,
     file_id: Optional[int] = None,
 ) -> Any:
-    db.execute(
-        text(
-            """
-            INSERT INTO sessions (id, user_id, file_id, applied_steps, updated_at)
-            VALUES (:id, :user_id, :file_id, :applied_steps, NOW())
-            ON DUPLICATE KEY UPDATE
-              applied_steps = VALUES(applied_steps),
-              user_id = COALESCE(VALUES(user_id), user_id),
-              file_id = COALESCE(VALUES(file_id), file_id),
-              updated_at = NOW()
-            """
-        ),
-        {
-            "id": session_id,
-            "user_id": user_id,
-            "file_id": file_id,
-            "applied_steps": json.dumps(steps or []),
-        },
-    )
+    params = {
+        "id": session_id,
+        "user_id": user_id,
+        "file_id": file_id,
+        "applied_steps": json.dumps(steps or []),
+    }
+    if _dialect_name(db) == "sqlite":
+        statement = """
+        INSERT INTO sessions (id, user_id, file_id, applied_steps, updated_at)
+        VALUES (:id, :user_id, :file_id, :applied_steps, CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO UPDATE SET
+          applied_steps = excluded.applied_steps,
+          user_id = COALESCE(excluded.user_id, sessions.user_id),
+          file_id = COALESCE(excluded.file_id, sessions.file_id),
+          updated_at = CURRENT_TIMESTAMP
+        """
+    else:
+        statement = """
+        INSERT INTO sessions (id, user_id, file_id, applied_steps, updated_at)
+        VALUES (:id, :user_id, :file_id, :applied_steps, NOW())
+        ON DUPLICATE KEY UPDATE
+          applied_steps = VALUES(applied_steps),
+          user_id = COALESCE(VALUES(user_id), user_id),
+          file_id = COALESCE(VALUES(file_id), file_id),
+          updated_at = NOW()
+        """
+    db.execute(text(statement), params)
     db.commit()
     _session_cache.invalidate(session_id)   # force fresh read on next request
     return get_session_record(db, session_id)
@@ -386,41 +399,55 @@ def save_step_snapshot(
 ) -> None:
     """Upsert the materialized file binary for session_id at step_index.
     Periodically evicts snapshots for sessions inactive beyond _SNAPSHOT_EXPIRY_DAYS."""
-    db.execute(
-        text(
-            """
-            INSERT INTO step_snapshots (session_id, step_index, file_binary, created_at)
-            VALUES (:session_id, :step_index, :file_binary, NOW())
-            ON DUPLICATE KEY UPDATE
-              file_binary = VALUES(file_binary),
-              created_at  = NOW()
-            """
-        ),
-        {
-            "session_id": session_id,
-            "step_index": step_index,
-            "file_binary": file_binary,
-        },
-    )
+    dialect = _dialect_name(db)
+    params = {
+        "session_id": session_id,
+        "step_index": step_index,
+        "file_binary": file_binary,
+    }
+    if dialect == "sqlite":
+        statement = """
+        INSERT INTO step_snapshots (session_id, step_index, file_binary, created_at)
+        VALUES (:session_id, :step_index, :file_binary, CURRENT_TIMESTAMP)
+        ON CONFLICT(session_id, step_index) DO UPDATE SET
+          file_binary = excluded.file_binary,
+          created_at  = CURRENT_TIMESTAMP
+        """
+    else:
+        statement = """
+        INSERT INTO step_snapshots (session_id, step_index, file_binary, created_at)
+        VALUES (:session_id, :step_index, :file_binary, NOW())
+        ON DUPLICATE KEY UPDATE
+          file_binary = VALUES(file_binary),
+          created_at  = NOW()
+        """
+    db.execute(text(statement), params)
     # Evict entire sessions that have had no snapshot activity for _SNAPSHOT_EXPIRY_DAYS.
     # This preserves ALL snapshots for active sessions (full undo history intact)
     # while reclaiming disk from abandoned sessions.
-    db.execute(
-        text(
-            """
-            DELETE FROM step_snapshots
-            WHERE session_id IN (
-                SELECT session_id FROM (
-                    SELECT session_id
-                    FROM step_snapshots
-                    GROUP BY session_id
-                    HAVING MAX(created_at) < NOW() - INTERVAL :days DAY
-                ) AS expired
-            )
-            """
-        ),
-        {"days": _SNAPSHOT_EXPIRY_DAYS},
-    )
+    if dialect == "sqlite":
+        eviction_statement = """
+        DELETE FROM step_snapshots
+        WHERE session_id IN (
+            SELECT session_id
+            FROM step_snapshots
+            GROUP BY session_id
+            HAVING MAX(created_at) < DATETIME('now', '-' || :days || ' days')
+        )
+        """
+    else:
+        eviction_statement = """
+        DELETE FROM step_snapshots
+        WHERE session_id IN (
+            SELECT session_id FROM (
+                SELECT session_id
+                FROM step_snapshots
+                GROUP BY session_id
+                HAVING MAX(created_at) < NOW() - INTERVAL :days DAY
+            ) AS expired
+        )
+        """
+    db.execute(text(eviction_statement), {"days": _SNAPSHOT_EXPIRY_DAYS})
     db.commit()
 
 
@@ -817,10 +844,11 @@ def list_models(
 
 
 def increment_model_usage(db: Session, model_id: int) -> None:
+    now_expr = "CURRENT_TIMESTAMP" if _dialect_name(db) == "sqlite" else "NOW()"
     db.execute(
         text(
             "UPDATE trained_models SET times_used = times_used + 1, "
-            "last_used_at = NOW() WHERE id = :id"
+            f"last_used_at = {now_expr} WHERE id = :id"
         ),
         {"id": model_id},
     )

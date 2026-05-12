@@ -1,11 +1,12 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks, Form
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 from app.db.connection import get_db
 from app.config.config import settings
 from app.services.ETL.data_profiler import DataProfiler
 from app.db import crud
-import os, uuid, io, logging, json
+import os, uuid, io, logging, json, re, shutil, tempfile
+from pathlib import Path
 import pandas as pd
 from app.routes.profiler_cache import get_profiler, set_profiler, remove_profiler, bytes_to_df
 from app.services.file_parser import get_merge_ranges
@@ -17,6 +18,29 @@ logger = logging.getLogger("uvicorn.error")
 # In-memory profiling status: session_id → {ready, profile, error, ...}
 # Acts as a fast cache; DB is the persistent source of truth.
 _profile_status: Dict[str, Any] = {}
+
+# ---------------------------------------------------------------------------
+# Chunked upload staging
+# ---------------------------------------------------------------------------
+# For very large files the frontend slices them into chunks; each chunk lands
+# here via /upload/chunk, then /upload/complete reassembles them.
+# App Platform allows up to 100 MiB request bodies, so the per-chunk cap is
+# set to 90 MiB with comfortable headroom.
+_CHUNK_STAGING_DIR = Path(tempfile.gettempdir()) / "cleanlogic_chunks"
+_CHUNK_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+# Per-chunk size cap (90 MiB — well within App Platform's 100 MiB limit)
+_MAX_CHUNK_BYTES = 90 * 1024 * 1024
+# Defensive cap on number of chunks per upload (1024 × 90 MiB ≈ 90 GiB ceiling)
+_MAX_CHUNKS = 1024
+
+
+def _chunk_dir_for(upload_id: str) -> Path:
+    """Return per-upload staging dir, sanitizing upload_id to prevent path
+    traversal. Accepts UUID-like strings; rejects anything else."""
+    safe = re.sub(r"[^a-zA-Z0-9_\-]", "", upload_id or "")[:64]
+    if not safe:
+        raise HTTPException(400, "Invalid upload_id")
+    return _CHUNK_STAGING_DIR / safe
 
 
 def _run_full_task(session_id: str, content: bytes, filename: str, file_id: int) -> None:
@@ -186,25 +210,27 @@ def _reconstruct_profile_from_db(session_id: str, db: Session) -> Dict[str, Any]
 router = APIRouter()
 
 
-@router.post("/upload")
-async def upload_file(
+async def _save_and_profile(
+    content: bytes,
+    filename: str,
+    user_id: int,
+    db: Session,
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    user_id: int = 1,
-    db: Session = Depends(get_db),
-):
-    content = await file.read()
+) -> JSONResponse:
+    """Shared pipeline used by both /upload (single POST) and /upload/complete
+    (chunked). Persists the file binary, kicks off async profiling, returns
+    the standard upload response payload."""
     if len(content) > settings.MAX_FILE_SIZE:
         raise HTTPException(400, f"File exceeds {settings.MAX_FILE_SIZE // 1024 // 1024}MB limit")
 
     session_id = str(uuid.uuid4())
     _profile_status[session_id] = {"ready": False, "profile": None, "error": None}
     try:
-        file_ext = os.path.splitext(file.filename)[1].lstrip(".").upper()
+        file_ext = os.path.splitext(filename)[1].lstrip(".").upper()
         file_record = crud.save_file(
             db=db,
             user_id=user_id,
-            file_name=file.filename,
+            file_name=filename,
             file_type=file_ext,
             file_binary=content,
             session_id=session_id,
@@ -214,15 +240,98 @@ async def upload_file(
         logger.error("DATABASE ERROR: %s", e)
         raise HTTPException(500, f"Database persistence failed: {str(e)}")
 
-    background_tasks.add_task(_run_full_task, session_id, content, file.filename, file_record.id)
+    background_tasks.add_task(_run_full_task, session_id, content, filename, file_record.id)
 
     return JSONResponse(content={
         "success": True,
         "session_id": session_id,
         "file_id": file_record.id,
-        "filename": file.filename,
+        "filename": filename,
         "profiling": "pending",
     })
+
+
+@router.post("/upload")
+async def upload_file(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    user_id: int = 1,
+    db: Session = Depends(get_db),
+):
+    content = await file.read()
+    return await _save_and_profile(content, file.filename, user_id, db, background_tasks)
+
+
+@router.post("/upload/chunk")
+async def upload_chunk_part(
+    chunk: UploadFile = File(...),
+    upload_id: str = Form(...),
+    chunk_index: int = Form(...),
+    total_chunks: int = Form(...),
+):
+    """Receive a single chunk of a chunked upload and persist it to a
+    per-upload staging dir. /upload/complete assembles the final file."""
+    if total_chunks <= 0 or total_chunks > _MAX_CHUNKS:
+        raise HTTPException(400, f"total_chunks must be 1..{_MAX_CHUNKS}")
+    if chunk_index < 0 or chunk_index >= total_chunks:
+        raise HTTPException(400, "Invalid chunk_index")
+
+    chunk_bytes = await chunk.read()
+    if len(chunk_bytes) > _MAX_CHUNK_BYTES:
+        raise HTTPException(
+            413,
+            f"Chunk exceeds {_MAX_CHUNK_BYTES // 1024 // 1024} MiB size limit",
+        )
+
+    chunk_dir = _chunk_dir_for(upload_id)
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    chunk_path = chunk_dir / f"{chunk_index:06d}.part"
+    chunk_path.write_bytes(chunk_bytes)
+
+    return JSONResponse({
+        "success": True,
+        "upload_id": upload_id,
+        "chunk_index": chunk_index,
+        "total_chunks": total_chunks,
+        "received_bytes": len(chunk_bytes),
+    })
+
+
+@router.post("/upload/complete")
+async def upload_complete(
+    background_tasks: BackgroundTasks,
+    upload_id: str = Form(...),
+    filename: str = Form(...),
+    total_chunks: int = Form(...),
+    user_id: int = Form(1),
+    db: Session = Depends(get_db),
+):
+    """Reassemble all chunks for upload_id, then run the same pipeline as
+    /upload (DB persist + async profiling)."""
+    chunk_dir = _chunk_dir_for(upload_id)
+    if not chunk_dir.is_dir():
+        raise HTTPException(404, "Upload not found or already finalized")
+
+    parts = sorted(chunk_dir.glob("*.part"))
+    if len(parts) != total_chunks:
+        # Cleanup stale staging dir on mismatch so a retry starts fresh
+        shutil.rmtree(chunk_dir, ignore_errors=True)
+        raise HTTPException(
+            400,
+            f"Expected {total_chunks} chunks, found {len(parts)}",
+        )
+
+    # Concatenate chunks into a single bytes buffer. With MAX_FILE_SIZE
+    # currently 200 MiB and 32 GiB instance memory, this is comfortably safe.
+    buf = bytearray()
+    for part in parts:
+        buf.extend(part.read_bytes())
+    content = bytes(buf)
+
+    # Cleanup staging immediately — don't keep duplicates around
+    shutil.rmtree(chunk_dir, ignore_errors=True)
+
+    return await _save_and_profile(content, filename, user_id, db, background_tasks)
 
 
 @router.get("/api/profile-status/{session_id}")

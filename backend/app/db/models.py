@@ -4,6 +4,9 @@ from sqlalchemy.sql import func
 from app.db.connection import Base
 import enum
 from sqlalchemy.dialects.mysql import LONGBLOB
+
+LongBinary = LargeBinary().with_variant(LONGBLOB(), "mysql")
+
 class FileTypeEnum(str, enum.Enum):
     CSV = "csv"
     XLSX = "xlsx"
@@ -146,8 +149,8 @@ class FileTable(Base):
     file_name     = Column(String(255), nullable=False)
     file_type     = Column(Enum(FileTypeEnum), nullable=False)
     file_size     = Column(BigInteger, nullable=False)          # bytes
-    file_binary          = Column(LONGBLOB, nullable=False)   # current working copy (may be cleaned)
-    original_file_binary = Column(LONGBLOB, nullable=True)    # immutable original — never overwritten
+    file_binary          = Column(LongBinary, nullable=False)   # current working copy (may be cleaned)
+    original_file_binary = Column(LongBinary, nullable=True)    # immutable original — never overwritten
 
     # Dataset shape (denormalised for quick display)
     row_count     = Column(Integer, nullable=True)
@@ -196,7 +199,7 @@ class StepSnapshot(Base):
     id          = Column(Integer, primary_key=True, index=True)
     session_id  = Column(String(100), nullable=False, index=True)
     step_index  = Column(Integer,     nullable=False)
-    file_binary = Column(LONGBLOB,    nullable=False)
+    file_binary = Column(LongBinary,    nullable=False)
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
@@ -414,7 +417,7 @@ class TrainedModel(Base):
     description = Column(Text, nullable=True)
 
     # Binary (pickle / joblib) — LONGBLOB to support models > 64 KB
-    model_binary = Column(LONGBLOB, nullable=False)
+    model_binary = Column(LongBinary, nullable=False)
     model_size   = Column(BigInteger, nullable=False)   # bytes
 
     # Training configuration (JSON): hyperparams, feature list, target column, etc.

@@ -264,18 +264,65 @@ class ApiService {
     const response = await api.post("/api/login/email", { email, password });
     return response.data;
   }
-  // Upload and profile file
-  async uploadFile(file) {
-    const formData = new FormData();
-    formData.append("file", file);
+  // Upload and profile file.
+  //
+  // App Platform allows up to 100 MiB request bodies. Files under 90 MiB go
+  // via a single POST; larger files are sliced into chunks, POSTed to
+  // /upload/chunk, then assembled server-side via /upload/complete.
+  async uploadFile(file, { onProgress } = {}) {
     const userId =
       localStorage.getItem("user_id") || localStorage.getItem("userId") || 1;
 
-    // upload route lives at root (/upload)
-    const response = await api.post(`/upload?user_id=${userId}`, formData, {
+    // 90 MiB threshold — safely under App Platform's 100 MiB body limit.
+    const SINGLE_POST_THRESHOLD = 90 * 1024 * 1024;
+
+    if (file.size <= SINGLE_POST_THRESHOLD) {
+      // Small file — original single-POST path
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await api.post(`/upload?user_id=${userId}`, formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      onProgress?.({ phase: "complete", loaded: file.size, total: file.size });
+      return response.data;
+    }
+
+    // Large file — chunked upload
+    const CHUNK_SIZE = 64 * 1024 * 1024; // 64 MiB per chunk
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    const uploadId =
+      (typeof crypto !== "undefined" && crypto.randomUUID && crypto.randomUUID()) ||
+      `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    for (let i = 0; i < totalChunks; i++) {
+      const blob = file.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+      const form = new FormData();
+      form.append("chunk", blob, `chunk-${i}`);
+      form.append("upload_id", uploadId);
+      form.append("chunk_index", String(i));
+      form.append("total_chunks", String(totalChunks));
+      await api.post("/upload/chunk", form, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      onProgress?.({
+        phase: "uploading",
+        loaded: Math.min((i + 1) * CHUNK_SIZE, file.size),
+        total: file.size,
+        chunkIndex: i,
+        totalChunks,
+      });
+    }
+
+    // Finalize: backend reassembles + runs the same pipeline as /upload
+    const finalForm = new FormData();
+    finalForm.append("upload_id", uploadId);
+    finalForm.append("filename", file.name);
+    finalForm.append("total_chunks", String(totalChunks));
+    finalForm.append("user_id", String(userId));
+    const response = await api.post("/upload/complete", finalForm, {
       headers: { "Content-Type": "multipart/form-data" },
     });
-
+    onProgress?.({ phase: "complete", loaded: file.size, total: file.size });
     return response.data;
   }
 
@@ -768,6 +815,13 @@ class ApiService {
 
   async getChartInsight(sessionId, { chart_type, x_axis, y_axis, title }) {
     const response = await api.post(`/api/ai/chart-insight`, { session_id: sessionId, chart_type, x_axis, y_axis: y_axis || null, title: title || null });
+    return response.data;
+  }
+
+  // Analyze a rendered chart (image + metadata) with Gemini vision.
+  // payload = { image_base64, chart_type, chart_title, x_axis, y_axis, x_stats, y_stats, applied_steps }
+  async analyzeChart(payload) {
+    const response = await api.post(`/api/ai/analyze-chart`, payload);
     return response.data;
   }
 
