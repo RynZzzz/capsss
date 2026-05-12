@@ -22,14 +22,15 @@ _profile_status: Dict[str, Any] = {}
 # ---------------------------------------------------------------------------
 # Chunked upload staging
 # ---------------------------------------------------------------------------
-# Cloud Run's HTTP ingress hard-caps single request bodies at 32 MiB. To
-# support larger files, the frontend slices files into <30 MiB chunks; each
-# chunk lands here, then /upload/complete reassembles them.
+# For very large files the frontend slices them into chunks; each chunk lands
+# here via /upload/chunk, then /upload/complete reassembles them.
+# App Platform allows up to 100 MiB request bodies, so the per-chunk cap is
+# set to 90 MiB with comfortable headroom.
 _CHUNK_STAGING_DIR = Path(tempfile.gettempdir()) / "cleanlogic_chunks"
 _CHUNK_STAGING_DIR.mkdir(parents=True, exist_ok=True)
-# Per-chunk size cap (must stay safely under Cloud Run's 32 MiB ingress)
-_MAX_CHUNK_BYTES = 30 * 1024 * 1024
-# Defensive cap on number of chunks per upload (1024 × 30 MiB ≈ 30 GiB ceiling)
+# Per-chunk size cap (90 MiB — well within App Platform's 100 MiB limit)
+_MAX_CHUNK_BYTES = 90 * 1024 * 1024
+# Defensive cap on number of chunks per upload (1024 × 90 MiB ≈ 90 GiB ceiling)
 _MAX_CHUNKS = 1024
 
 
@@ -279,7 +280,7 @@ async def upload_chunk_part(
     if len(chunk_bytes) > _MAX_CHUNK_BYTES:
         raise HTTPException(
             413,
-            f"Chunk exceeds {_MAX_CHUNK_BYTES // 1024 // 1024} MiB ingress safety cap",
+            f"Chunk exceeds {_MAX_CHUNK_BYTES // 1024 // 1024} MiB size limit",
         )
 
     chunk_dir = _chunk_dir_for(upload_id)

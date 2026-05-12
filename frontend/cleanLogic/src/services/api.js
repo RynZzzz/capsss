@@ -266,16 +266,15 @@ class ApiService {
   }
   // Upload and profile file.
   //
-  // Cloud Run rejects single HTTP request bodies above 32 MiB at the ingress
-  // (this applies to BOTH HTTP/1 and HTTP/2 unary requests). For larger
-  // files we slice the blob into 16 MiB chunks, POST each to /upload/chunk,
-  // then call /upload/complete to assemble + profile server-side.
+  // App Platform allows up to 100 MiB request bodies. Files under 90 MiB go
+  // via a single POST; larger files are sliced into chunks, POSTed to
+  // /upload/chunk, then assembled server-side via /upload/complete.
   async uploadFile(file, { onProgress } = {}) {
     const userId =
       localStorage.getItem("user_id") || localStorage.getItem("userId") || 1;
 
-    // 30 MiB threshold leaves safety margin under the 32 MiB Cloud Run cap.
-    const SINGLE_POST_THRESHOLD = 30 * 1024 * 1024;
+    // 90 MiB threshold — safely under App Platform's 100 MiB body limit.
+    const SINGLE_POST_THRESHOLD = 90 * 1024 * 1024;
 
     if (file.size <= SINGLE_POST_THRESHOLD) {
       // Small file — original single-POST path
@@ -289,7 +288,7 @@ class ApiService {
     }
 
     // Large file — chunked upload
-    const CHUNK_SIZE = 16 * 1024 * 1024; // 16 MiB per chunk
+    const CHUNK_SIZE = 64 * 1024 * 1024; // 64 MiB per chunk
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
     const uploadId =
       (typeof crypto !== "undefined" && crypto.randomUUID && crypto.randomUUID()) ||

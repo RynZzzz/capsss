@@ -16,8 +16,9 @@ class Settings(BaseSettings):
     PORT: int = 8000
     DEBUG: bool = False
     
-    # CORS - Now properly handles both string and list
-    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173,https://cleanlogic-crq3zqlviq-as.a.run.app,https://cleanlogic-191625527569.asia-southeast1.run.app"
+    # CORS — comma-separated list. Override via CORS_ORIGINS env var in production
+    # (App Platform: set this to the public URL of the deployed app).
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173"
     
     # Directories
     UPLOAD_DIR: str = "uploads"
@@ -25,9 +26,8 @@ class Settings(BaseSettings):
     PROCESSED_DIR: str = "processed"
     
     # File Settings
-    # NOTE: On Cloud Run, requests >32 MiB require --use-http2 + gen2 execution
-    # environment. With HTTP/1.1 the ingress hard-caps the body at 32 MiB
-    # regardless of this value.
+    # App Platform defaults to a 100 MiB request body cap. Files larger than
+    # ~95 MiB should use the /upload/chunk + /upload/complete flow.
     MAX_FILE_SIZE: int = 200 * 1024 * 1024  # 200 MiB
     
     GOOGLE_CLIENT_ID: str = "191625527569-l6ereqd4ga4o4h5l4t5vr685nri9l2hj.apps.googleusercontent.com"

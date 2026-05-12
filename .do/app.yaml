@@ -1,0 +1,60 @@
+name: capsss-app
+region: sgp
+
+services:
+  - name: capsss-service
+    github:
+      repo: RynZzzz/capsss
+      branch: codex/do-app-platform-deploy
+      deploy_on_push: true
+    dockerfile_path: Dockerfile
+
+    http_port: 8080
+    instance_count: 1
+    # 2 GB RAM minimum — catboost + pandas need headroom beyond 1 GB
+    instance_size_slug: apps-s-1vcpu-2gb
+
+    # ── Health check ────────────────────────────────────────────────────────
+    # Liveness: /health (fast, no DB). Used by App Platform to decide if the
+    # container is alive. Readiness: /ready (pings DB). Can be used for
+    # traffic routing once App Platform supports separate readiness probes.
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 10
+      period_seconds: 15
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 3
+
+    # ── Build-time args ─────────────────────────────────────────────────────
+    envs:
+      # Passed as Docker build arg → baked into the frontend bundle
+      - key: VITE_GOOGLE_CLIENT_ID
+        scope: BUILD_TIME
+        value: "191625527569-l6ereqd4ga4o4h5l4t5vr685nri9l2hj.apps.googleusercontent.com"
+        type: GENERAL
+
+    # ── Runtime env vars ────────────────────────────────────────────────────
+      # Injected by App Platform from the attached database component
+      - key: DATABASE_URL
+        scope: RUN_TIME
+        value: ${db.DATABASE_URL}
+
+      - key: CORS_ORIGINS
+        scope: RUN_TIME
+        value: "${APP_URL}"
+        type: GENERAL
+
+      - key: GOOGLE_CLIENT_ID
+        scope: RUN_TIME
+        value: "191625527569-l6ereqd4ga4o4h5l4t5vr685nri9l2hj.apps.googleusercontent.com"
+        type: GENERAL
+
+# ── Managed Database ──────────────────────────────────────────────────────────
+databases:
+  - name: db
+    engine: MYSQL
+    version: "8"
+    production: false
+    db_name: cleanlogic
+    db_user: cleanlogic

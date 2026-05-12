@@ -1,39 +1,26 @@
 from sqlalchemy import create_engine, event as sa_event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.engine import URL
 import os
 from pathlib import Path
 
 # ─── DATABASE URL ─────────────────────────────────────────────────────────────
-# Reads from environment variables; falls back to an embedded SQLite file.
+# Reads from the DATABASE_URL environment variable; falls back to an embedded
+# SQLite file when unset (local development).
 #
-# PostgreSQL (production):
+# DigitalOcean App Platform — Managed MySQL (production):
+#   DATABASE_URL=mysql+pymysql://user:password@host:25060/cleanlogic?ssl-mode=REQUIRED
+#
+# PostgreSQL (alternative production target):
 #   DATABASE_URL=postgresql://user:password@host:5432/cleanlogic
 #
-# Cloud SQL MySQL (production):
-#   CLOUD_SQL_CONNECTION_NAME=project:region:instance
-#   DB_USER=cleanlogic
-#   DB_PASSWORD=<secret>
-#   DB_NAME=cleanlogic
-#
-# SQLite (low-cost Cloud Run / development):
+# SQLite (local dev / tests):
 #   DATABASE_URL=sqlite:////tmp/cleanlogic.db
 #
 def _build_database_url():
     explicit_url = os.getenv("DATABASE_URL")
     if explicit_url:
         return explicit_url
-
-    cloud_sql_connection_name = os.getenv("CLOUD_SQL_CONNECTION_NAME")
-    if cloud_sql_connection_name:
-        return URL.create(
-            "mysql+pymysql",
-            username=os.getenv("DB_USER", "cleanlogic"),
-            password=os.getenv("DB_PASSWORD", ""),
-            database=os.getenv("DB_NAME", "cleanlogic"),
-            query={"unix_socket": f"/cloudsql/{cloud_sql_connection_name}"},
-        )
 
     return "sqlite:////tmp/cleanlogic.db"
 

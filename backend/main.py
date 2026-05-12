@@ -37,10 +37,7 @@ from app.config.config import settings
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins_list + [
-        "https://cleanlogic-crq3zqlviq-as.a.run.app",
-        "https://cleanlogic-191625527569.asia-southeast1.run.app"
-    ],
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,  # Set to True for OAuth cookies/sessions
     allow_methods=["*"],
     allow_headers=["*"],
@@ -72,7 +69,22 @@ async def root():
 
 @app.get("/health")
 async def health_check():
+    """Liveness probe — lightweight, no DB hit."""
     return {"status": "healthy"}
+
+@app.get("/ready")
+async def readiness_check():
+    """Deeper readiness probe — verifies the DB is reachable."""
+    from sqlalchemy import text as _text
+    from app.db.connection import SessionLocal
+    db = SessionLocal()
+    try:
+        db.execute(_text("SELECT 1"))
+        return {"status": "ready"}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"DB not reachable: {exc}")
+    finally:
+        db.close()
 
 
 frontend_dist = Path(
@@ -90,7 +102,7 @@ if frontend_dist.exists():
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_frontend(full_path: str):
-        api_prefixes = ("api/", "file/", "files/", "export/", "save", "save-text", "health")
+        api_prefixes = ("api/", "file/", "files/", "export/", "save", "save-text", "health", "ready")
         if full_path.startswith(api_prefixes):
             raise HTTPException(status_code=404, detail="Not found")
         requested_file = frontend_dist / full_path
