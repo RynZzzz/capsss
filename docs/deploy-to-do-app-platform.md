@@ -40,8 +40,8 @@ In the service's **Environment Variables** section, add:
 | `CORS_ORIGINS` | `${APP_URL}` | General |
 | `VITE_GOOGLE_CLIENT_ID` | `191625527569-...` | General |
 | `GOOGLE_CLIENT_ID` | `191625527569-...` | General |
-| `GEMINI_API_KEY` | *(your key)* | **Secret** |
 | `GROQ_API_KEY` | *(your key)* | **Secret** |
+| `OPENROUTER_API_KEY` | *(optional fallback key)* | **Secret** |
 
 > `VITE_GOOGLE_CLIENT_ID` must be set as a **build-time** variable (toggle "Available during build" in the Console) so it gets baked into the frontend bundle.
 
@@ -157,5 +157,6 @@ App Platform keeps the previous deployment alive until the new one passes health
 | Container starts then crashes | `DATABASE_URL` not set | Confirm the DB component is named `db` and the env var uses `${db.DATABASE_URL}` |
 | `/ready` returns 503 | DB not reachable | Check the managed DB is in "online" state; verify SSL mode in connection string |
 | CORS errors in browser | `CORS_ORIGINS` mismatch | Set to your actual domain (include `https://`). Multiple origins: comma-separated |
+| AI insights fail or fall back to basic text | Missing LLM key | Set `GROQ_API_KEY` as a secret env var, or `OPENROUTER_API_KEY` as fallback |
 | Upload fails for large files | Body too large | App Platform allows 100 MiB by default; check file isn't over `MAX_FILE_SIZE` (200 MiB) |
 | Google sign-in fails | Client ID mismatch | Ensure `GOOGLE_CLIENT_ID` (backend) and `VITE_GOOGLE_CLIENT_ID` (frontend) match, and the authorized origin in Google Console includes your app URL |

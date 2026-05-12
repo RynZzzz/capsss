@@ -818,7 +818,7 @@ class ApiService {
     return response.data;
   }
 
-  // Analyze a rendered chart (image + metadata) with Gemini vision.
+  // Analyze a rendered chart (image + metadata) with the configured vision provider.
   // payload = { image_base64, chart_type, chart_title, x_axis, y_axis, x_stats, y_stats, applied_steps }
   async analyzeChart(payload) {
     const response = await api.post(`/api/ai/analyze-chart`, payload);
